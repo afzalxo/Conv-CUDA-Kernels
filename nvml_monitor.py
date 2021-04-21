@@ -1,6 +1,7 @@
 from pynvml import *
 import time
 import threading
+import subprocess
 
 class NVMLMonThread(threading.Thread):
     def __init__(self, fname, kwargs=None):
@@ -39,11 +40,12 @@ class NVMLMonThread(threading.Thread):
         nvmlShutdown()
 
 
-monT = NVMLMonThread('trace_0')
+monT = NVMLMonThread('trace_gemm_14')
+print('Starting Monitoring Thread...')
 monT.start()
-time.sleep(10)
+kern_proc = subprocess.Popen(['./gemm_kernel'])
+kern_proc.wait()
 monT.finish = True
-
 monT.join()
 print('Done. Adios Amigo...')
 
