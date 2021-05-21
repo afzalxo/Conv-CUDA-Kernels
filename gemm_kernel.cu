@@ -106,7 +106,7 @@ int main() {
   dim3 blocks(BLOCKS_X, BLOCKS_Y);
 
   // Launch kernel
-  //printf("Calling Kernel...\n");
+  printf("Calling Kernel...\n");
   logger.caller_state = 2;
   matrixMul<<<blocks, threads>>>(d_a, d_b, d_c, N, M, K);
   gpuErrchk(cudaDeviceSynchronize());
