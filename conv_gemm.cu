@@ -12,6 +12,8 @@ using std::cout;
 using std::generate;
 using std::vector;
 
+//Printing takes quite a bit of time. Discount time logging when debugging
+#define DEBUG 0
 
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
 inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
@@ -28,10 +30,8 @@ __global__ void matrixMul(const int *a, const int *b, int *c, int N, int M, int 
   int row = blockIdx.y * blockDim.y + threadIdx.y;
   int col = blockIdx.x * blockDim.x + threadIdx.x;
   //printf("Kernel Called...");
-
   // Iterate over row, and down column
-  //printf("%d, %d\n", row, col);
-  if(row < N && col < K){
+  if(row >= 0 && row < N && col >=0 && col < K){
 	  c[row * K + col] = 0;
 	  for (int k = 0; k < M; k++) {
 	    // Accumulate results for a single element
@@ -111,8 +111,9 @@ void print_4d_tensor(int *a, int rows, int cols, int channels, int number){
 }
 
 int main(){
-	int k = 3, C = 2, K = 2;
-	int H = 3, W = 3;
+	srand(10); //asserting fixed seed for reproducability
+	int k = 3, C = 2048, K = 8192;
+	int H = 56, W = 56;
 	int feat_tr_H = (W-k+1)*(H-k+1);
 	int feat_tr_W = k*k*C;
 	int *kern;
@@ -120,54 +121,61 @@ int main(){
 	int *kern_tr;
 	int *feat_tr;
 	int *mat_res;
-	gpuErrchk(cudaMallocManaged(&kern, k*k*C*K));
-	gpuErrchk(cudaMallocManaged(&feat, H*W*C));
-	gpuErrchk(cudaMallocManaged(&kern_tr, k*k*C*K));
-	gpuErrchk(cudaMallocManaged(&feat_tr, feat_tr_H*feat_tr_W));
-	gpuErrchk(cudaMallocManaged(&mat_res, feat_tr_H*feat_tr_W*K));
+
+	gpuErrchk(cudaMallocManaged(&kern, k*k*C*K*sizeof(int)));
+	gpuErrchk(cudaMallocManaged(&feat, H*W*C*sizeof(int)));
+	gpuErrchk(cudaMallocManaged(&kern_tr, k*k*C*K*sizeof(int)));
+	gpuErrchk(cudaMallocManaged(&feat_tr, feat_tr_H*feat_tr_W*sizeof(int)));
+	gpuErrchk(cudaMallocManaged(&mat_res, feat_tr_H*K*sizeof(int)));
+
 	rand_mat(kern, k*k*C*K);
 	rand_mat(feat, H*W*C);
-	int THREADS=9;
-	int BLOCKS=1;
+
+	int THREADS = 32;
+	int BLOCKS = (K + THREADS - 1)/THREADS;
 	filter_transform<<<BLOCKS, THREADS>>>(kern, kern_tr, k, C, K);
+	gpuErrchk(cudaDeviceSynchronize());
+
+#if DEBUG
 	printf("Printing origin filters\n");
 	print_4d_tensor(kern, k, k, C, K);
-	//for (int i = 0; i < k*k*C*K; i++){
-	//	printf("%d ", kern[i]);
-	//}
-	gpuErrchk(cudaDeviceSynchronize());
 	printf("\nPrinting reshaped filters\n");
 	print_3d_tensor(kern_tr, k*k*C, K, 1);
-	//for (int i = 0; i < k*k*C*K; i++){
-	//	printf("%d ", kern_tr[i]);
-	//}
-	printf("\n");
-	int THREADS_C = W-k+1;
-	int THREADS_R = H-k+1;
-	dim3 threads(THREADS_C, THREADS_R);
-	dim3 blocks(1);
+#endif
+	//int THREADS_C = W-k+1;
+	//int THREADS_R = H-k+1;
+	//dim3 threads(THREADS_R, THREADS_C);
+	int FTTHREADS = 32;
+	dim3 threads(FTTHREADS, FTTHREADS);
+	int CBLOCKS = (W-k+1 + FTTHREADS - 1) / FTTHREADS;
+	int RBLOCKS = (H-k+1 + FTTHREADS - 1) / FTTHREADS;
+	dim3 blocks(CBLOCKS, RBLOCKS);
 	feature_transform<<<blocks, threads>>>(feat, feat_tr, H, W, C, k);
+	gpuErrchk(cudaDeviceSynchronize());
+#if DEBUG
 	printf("\nPrinting original FM\n");
 	print_3d_tensor(feat, H, W, C);
-	gpuErrchk(cudaDeviceSynchronize());
 	printf("\nPrinting shards\n");
 	print_3d_tensor(feat_tr, feat_tr_H, feat_tr_W, 1);
-
+#endif
 	int THREADS_MUL = 32;
-	int BLOCKS_R = (feat_tr_H*feat_tr_W + THREADS_MUL - 1)/THREADS_MUL;
+	int BLOCKS_R = (feat_tr_H + THREADS_MUL - 1)/THREADS_MUL;
 	int BLOCKS_C = (K + THREADS_MUL - 1)/THREADS_MUL;
 	dim3 threads_mul(THREADS_MUL, THREADS_MUL);
-	dim3 blocks_mul(BLOCKS_R, BLOCKS_C);
+	dim3 blocks_mul(BLOCKS_C, BLOCKS_R);
 	matrixMul<<<blocks_mul, threads_mul>>>(feat_tr, kern_tr, mat_res, feat_tr_H, feat_tr_W, K);
 	gpuErrchk(cudaDeviceSynchronize());
+#if DEBUG
 	printf("\nPrinting results\n");
 	print_3d_tensor(mat_res, feat_tr_H, K, 1);
-	
+#endif
 	cudaFree(kern);
 	cudaFree(feat);
 	cudaFree(feat_tr);
 	cudaFree(kern_tr);
 	cudaFree(mat_res);
+	
+	printf("\n Finished... \n");
 	return 0;
 }
 
