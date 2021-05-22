@@ -6,7 +6,6 @@
 #include <vector>
 #include <cuda.h>
 #include "nvml_monitor.h"
-//#include "gemm_kernel.h"
 
 using std::cout;
 using std::generate;
@@ -112,7 +111,12 @@ void print_4d_tensor(int *a, int rows, int cols, int channels, int number){
 
 int main(){
 	srand(10); //asserting fixed seed for reproducability
-	int k = 3, C = 2048, K = 8192;
+	std::string const fname = {"trace_conv_gemm.csv"};
+	int dev = 0;
+	//Instantiate and start nvml tracing thread
+	NVMLMonThread logger(dev, fname);
+
+	int k = 3, C = 8192, K = 16384;
 	int H = 56, W = 56;
 	int feat_tr_H = (W-k+1)*(H-k+1);
 	int feat_tr_W = k*k*C;
@@ -131,11 +135,14 @@ int main(){
 	rand_mat(kern, k*k*C*K);
 	rand_mat(feat, H*W*C);
 
+	std::thread threadStart(&NVMLMonThread::log, &logger);
+
 	int THREADS = 32;
 	int BLOCKS = (K + THREADS - 1)/THREADS;
+	logger.caller_state = 1; //Calling filter transform kernel state
 	filter_transform<<<BLOCKS, THREADS>>>(kern, kern_tr, k, C, K);
 	gpuErrchk(cudaDeviceSynchronize());
-
+	logger.caller_state = 2; //Calling FM transform kernel exec state
 #if DEBUG
 	printf("Printing origin filters\n");
 	print_4d_tensor(kern, k, k, C, K);
@@ -152,6 +159,7 @@ int main(){
 	dim3 blocks(CBLOCKS, RBLOCKS);
 	feature_transform<<<blocks, threads>>>(feat, feat_tr, H, W, C, k);
 	gpuErrchk(cudaDeviceSynchronize());
+	logger.caller_state = 3; //Calling matmul kernel state
 #if DEBUG
 	printf("\nPrinting original FM\n");
 	print_3d_tensor(feat, H, W, C);
@@ -165,6 +173,10 @@ int main(){
 	dim3 blocks_mul(BLOCKS_C, BLOCKS_R);
 	matrixMul<<<blocks_mul, threads_mul>>>(feat_tr, kern_tr, mat_res, feat_tr_H, feat_tr_W, K);
 	gpuErrchk(cudaDeviceSynchronize());
+	logger.caller_state = 4; //Finished exec state.
+	std::thread threadKill(&NVMLMonThread::killThread, &logger);
+	threadStart.join();
+	threadKill.join();
 #if DEBUG
 	printf("\nPrinting results\n");
 	print_3d_tensor(mat_res, feat_tr_H, K, 1);
