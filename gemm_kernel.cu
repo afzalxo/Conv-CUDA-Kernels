@@ -6,6 +6,7 @@
 #include <vector>
 #include <cuda.h>
 #include "nvml_monitor.h"
+#include "gemm_kernel.h"
 
 using std::cout;
 using std::generate;
