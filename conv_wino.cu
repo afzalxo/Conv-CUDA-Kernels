@@ -218,13 +218,13 @@ void print_4d_tensor(int *a, int rows, int cols, int channels, int number){
 
 int main(){
 	srand(10); //asserting fixed seed for reproducability
-	//std::string const fname = {"trace_conv_gemm.csv"};
-	//int dev = 0;
+	std::string const fname = {"trace_conv_wino.csv"};
+	int dev = 0;
 	//Instantiate and start nvml tracing thread
-	//NVMLMonThread logger(dev, fname);
+	NVMLMonThread logger(dev, fname);
 
-	int k = 3, C = 1, K = pow(2,14);
-	int H = 222, W = 222, m = 4;
+	int k = 3, C = 1, K = pow(2,9);
+	int H = 998, W = 998, m = 4;
 	int tileSize = m + k - 1;
 	int feat_tiles_per_ch_horiz = (W - k + 1) / m;
 	int feat_tiles_per_ch_vert = (H - k + 1) / m;
@@ -246,14 +246,14 @@ int main(){
 	rand_mat(kern, k*k*C*K);
 	rand_mat(feat, H*W*C);
 
-	//std::thread threadStart(&NVMLMonThread::log, &logger);
+	std::thread threadStart(&NVMLMonThread::log, &logger);
 	
-	int THREADS = 32;
+	int THREADS = 32*32;
 	int BLOCKS = (K + THREADS - 1)/THREADS;
-	//logger.caller_state = 1; //Calling filter transform kernel state
+	logger.caller_state = 1; //Calling filter transform kernel state
 	filter_transform<<<BLOCKS, THREADS>>>(kern, kern_tr, k, C, K);
-	gpuErrchk(cudaDeviceSynchronize());
-	//logger.caller_state = 2; //Calling FM transform kernel exec state
+	//gpuErrchk(cudaDeviceSynchronize()); //Dont need to block exec here since feature_transform is indep of filter transform.
+	logger.caller_state = 2; //Calling FM transform kernel exec state
 #if DEBUG
 	printf("Printing original filters\n");
 	print_4d_tensor(kern, k, k, C, K);
@@ -277,14 +277,14 @@ int main(){
 	//print_3d_tensor(feat, H, W, C);
 	//print_3d_tensor(ft_out, 6,6,1);
 		
-	int FTTHREADS = 1;
+	int FTTHREADS = 32;
 	dim3 threads(FTTHREADS, FTTHREADS);
 	int CBLOCKS = ((W-k+1)/m + FTTHREADS - 1) / FTTHREADS;
 	int RBLOCKS = ((H-k+1)/m + FTTHREADS - 1) / FTTHREADS;
 	dim3 blocks(CBLOCKS, RBLOCKS);
 	feature_transform<<<blocks, threads>>>(feat, feat_tr, H, W, C);
 	gpuErrchk(cudaDeviceSynchronize());
-	//logger.caller_state = 3; //Calling matmul kernel state
+	logger.caller_state = 3; //Calling ewm kernel state
 #if DEBUG
 	printf("\nPrinting original FM\n");
 	print_3d_tensor_int(feat, H, W, C);
@@ -293,7 +293,7 @@ int main(){
 #endif
 	
 	
-	int THREADS_MUL = 1;
+	int THREADS_MUL = 10;
 	int BLOCKS_R = (feat_tiles_per_ch_vert + THREADS_MUL - 1)/THREADS_MUL;
 	int BLOCKS_C = (feat_tiles_per_ch_horiz + THREADS_MUL - 1)/THREADS_MUL;
 	int BLOCKS_Z = (K + THREADS_MUL - 1)/THREADS_MUL;
@@ -301,18 +301,13 @@ int main(){
 	dim3 blocks_mul(BLOCKS_C, BLOCKS_R, BLOCKS_Z);
 	ewm<<<blocks_mul, threads_mul>>>(feat_tr, kern_tr, ewm_res, H, K, m);
 	gpuErrchk(cudaDeviceSynchronize());
-	//logger.caller_state = 4; //Finished exec state.
-	//std::thread threadKill(&NVMLMonThread::killThread, &logger);
-	//threadStart.join();
-	//threadKill.join();
+	logger.caller_state = 4; //Inv transform exec state.
 
 #if DEBUG
 	printf("\nPrinting EWM result\n");
 	print_3d_tensor_float(ewm_res, tileSize*tileSize, feat_tiles_per_ch_horiz, feat_tiles_per_ch_vert*K);
 #endif
-
-
-	int THREADS_INV = 1;
+	int THREADS_INV = 10;
 	int BLOCKS_V = (feat_tiles_per_ch_vert + THREADS_INV - 1)/THREADS_INV;
 	int BLOCKS_U = (feat_tiles_per_ch_horiz + THREADS_INV - 1)/THREADS_INV;
 	int BLOCKS_W = (K + THREADS_INV - 1)/THREADS_INV;
@@ -320,10 +315,15 @@ int main(){
 	dim3 blocks_inv(BLOCKS_U, BLOCKS_V, BLOCKS_W);
 	inverse_transform<<<blocks_inv, threads_inv>>>(ewm_res, conv_out, H, K, m);
 	gpuErrchk(cudaDeviceSynchronize());
+	logger.caller_state = 5; //Finished exec state
 #if DEBUG
 	printf("\nPrinting Conv Output\n");
 	print_3d_tensor_float(conv_out, m*m, feat_tiles_per_ch_horiz, feat_tiles_per_ch_vert*K);
 #endif
+	std::thread threadKill(&NVMLMonThread::killThread, &logger);
+	threadStart.join();
+	threadKill.join();
+
 	cudaFree(kern);
 	cudaFree(feat);
 	cudaFree(feat_tr);
