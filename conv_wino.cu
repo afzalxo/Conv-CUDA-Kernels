@@ -48,19 +48,53 @@ __global__ void filter_transform(const int *filters, int *resh_filt, int k, int 
 	}
 }
 
+inline void transform_feature_tile(int *temp, int *res, int m= 6){
+	int B_tr[36] = {4, 0, -5, 0, 1, 0, 0, -4, -4, 1, 1, 0, 0, 4, -4, -1, 1, 0, 0, -2, -1, 2, 1, 0, 0, 2, -1, -2, 1, 0, 0, 4, 0, -5, 0, 1};
+	int B[36] = {4,  0,  0,  0,  0,  0,  0, -4,  4, -2,  2,  4, -5, -4, -4, -1, -1, 0,  0,  1, -1,  2, -2, -5, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1};
+	int temp0[36];
+	for (int i = 0; i < 6; i++){
+		for(int k = 0; k < 6; k++){
+			temp0[i*6 + k] = 0;
+		}
+	}
+	for (int i = 0; i < 6; i++){
+		for(int j = 0; j < 6; j++){
+			for ( int k = 0; k < 6; k++){
+				temp0[i*6 + k] += B_tr[i*6 + j] * temp[j*6 + k];
+			}		
+		}
+	}
+	for (int i = 0; i < 6; i++){
+		for(int j = 0; j < 6; j++){
+			for ( int k = 0; k < 6; k++){
+				res[i*6 + k] += temp0[i*6 + j] * B[j*6 + k];
+			}		
+		}
+	}
+}
+
 __global__ void feature_transform(const int* features, int *shards, int H, int W, int C, int m = 4){
 	uint tsize = m+3-1;
 	uint out_rows = (H - 3 + 1) / m;
 	uint out_cols = (W - 3 + 1) / m;
 	int col = blockIdx.x * blockDim.x + threadIdx.x;
 	int row = blockIdx.y * blockDim.y + threadIdx.y;
+	int *temp;
+	int *ft_tile;
 	if (row >= 0 && row < out_rows && col >= 0 && col < out_cols){
 		for(int ch = 0; ch < C; ch++){
 			for (int u = 0; u < tsize; u++){
 				for (int v = 0; v < tsize; v++){
-					shards[u*k+v + k*k*C*col + k*k*C*out_cols*row + ch*k*k] = features[ch*H*W + (row*m+u)*W + col*m+v];	
+					//shards[u*k+v + k*k*C*col + k*k*C*out_cols*row + ch*k*k] = features[ch*H*W + (row*m+u)*W + col*m+v];	
+					temp[u*tsize + v] = features[(row*W + col)*m + u*W + v];
 				}
 			}
+			transform_feature_tile(temp, ft_tile, m);
+		 	for (int u =0; u < tsize; u++){
+				for (int v = 0; v < tsize; v++){
+					shards[(row*out_cols + col) * tsize*tsize + u*tsize + v] = ft_tile[u*tsize + v];
+				}
+			}	
 		}
 	}
 }
@@ -112,13 +146,17 @@ void print_4d_tensor(int *a, int rows, int cols, int channels, int number){
 
 int main(){
 	srand(10); //asserting fixed seed for reproducability
-	std::string const fname = {"trace_conv_gemm.csv"};
-	int dev = 0;
+	//std::string const fname = {"trace_conv_gemm.csv"};
+	//int dev = 0;
 	//Instantiate and start nvml tracing thread
-	NVMLMonThread logger(dev, fname);
+	//NVMLMonThread logger(dev, fname);
 
-	int k = 3, C = 8192, K = 16384;
-	int H = 56, W = 56;
+	int k = 3, C = 1, K = 1;
+	int H = 6, W = 6, m = 4;
+	int tileSize = m + k - 1;
+	int feat_tiles_per_ch_horiz = (W - k + 1) / m;
+	int feat_tiles_per_ch_vert = (H - k + 1) / m;
+	int feat_tiles_per_ch = feat_tiles_per_ch_horiz * feat_tiles_per_ch_vert;
 	int feat_tr_H = (W-k+1)*(H-k+1);
 	int feat_tr_W = k*k*C;
 	int *kern;
@@ -130,14 +168,14 @@ int main(){
 	gpuErrchk(cudaMallocManaged(&kern, k*k*C*K*sizeof(int)));
 	gpuErrchk(cudaMallocManaged(&feat, H*W*C*sizeof(int)));
 	gpuErrchk(cudaMallocManaged(&kern_tr, k*k*C*K*sizeof(int)));
-	gpuErrchk(cudaMallocManaged(&feat_tr, feat_tr_H*feat_tr_W*sizeof(int)));
+	gpuErrchk(cudaMallocManaged(&feat_tr, tileSize*tileSize*feat_tiles_per_ch*C*sizeof(int)));
 	gpuErrchk(cudaMallocManaged(&mat_res, feat_tr_H*K*sizeof(int)));
 
 	rand_mat(kern, k*k*C*K);
 	rand_mat(feat, H*W*C);
 
-	std::thread threadStart(&NVMLMonThread::log, &logger);
-
+	//std::thread threadStart(&NVMLMonThread::log, &logger);
+	/*
 	int THREADS = 32;
 	int BLOCKS = (K + THREADS - 1)/THREADS;
 	logger.caller_state = 1; //Calling filter transform kernel state
@@ -150,23 +188,33 @@ int main(){
 	printf("\nPrinting reshaped filters\n");
 	print_3d_tensor(kern_tr, k*k*C, K, 1);
 #endif
+	*/
 	//int THREADS_C = W-k+1;
 	//int THREADS_R = H-k+1;
 	//dim3 threads(THREADS_R, THREADS_C);
+
+	int *ft_out;
+	gpuErrchk(cudaMallocManaged(&ft_out, 6*6*sizeof(int)));
+	transform_feature_tile(feat, ft_out, 4);
+	print_3d_tensor(feat, H, W, C);
+	print_3d_tensor(ft_out, 6,6,1);
+	/*	
 	int FTTHREADS = 32;
 	dim3 threads(FTTHREADS, FTTHREADS);
-	int CBLOCKS = (W-k+1 + FTTHREADS - 1) / FTTHREADS;
-	int RBLOCKS = (H-k+1 + FTTHREADS - 1) / FTTHREADS;
+	int CBLOCKS = ((W-k+1)/m + FTTHREADS - 1) / FTTHREADS;
+	int RBLOCKS = ((H-k+1)/m + FTTHREADS - 1) / FTTHREADS;
 	dim3 blocks(CBLOCKS, RBLOCKS);
 	feature_transform<<<blocks, threads>>>(feat, feat_tr, H, W, C, k);
 	gpuErrchk(cudaDeviceSynchronize());
-	logger.caller_state = 3; //Calling matmul kernel state
+	//logger.caller_state = 3; //Calling matmul kernel state
 #if DEBUG
 	printf("\nPrinting original FM\n");
 	print_3d_tensor(feat, H, W, C);
 	printf("\nPrinting shards\n");
-	print_3d_tensor(feat_tr, feat_tr_H, feat_tr_W, 1);
+	print_3d_tensor(feat_tr, tileSize, tileSize, feat_tiles_per_ch);
 #endif
+	*/
+	/*
 	int THREADS_MUL = 32;
 	int BLOCKS_R = (feat_tr_H + THREADS_MUL - 1)/THREADS_MUL;
 	int BLOCKS_C = (K + THREADS_MUL - 1)/THREADS_MUL;
@@ -182,6 +230,7 @@ int main(){
 	printf("\nPrinting results\n");
 	print_3d_tensor(mat_res, feat_tr_H, K, 1);
 #endif
+	*/
 	cudaFree(kern);
 	cudaFree(feat);
 	cudaFree(feat_tr);
