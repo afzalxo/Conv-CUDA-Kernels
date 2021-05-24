@@ -24,39 +24,38 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
    }
 }
 
-__global__ void matrixMul(const int *a, const int *b, int *c, int N, int M, int K) {
+__global__ void matrixMul(const int *a, const int *b, int *c, ulong N, ulong M, ulong K) {
   // Compute each thread's global row and column index
-  int row = blockIdx.y * blockDim.y + threadIdx.y;
-  int col = blockIdx.x * blockDim.x + threadIdx.x;
+  ulong row = blockIdx.y * blockDim.y + threadIdx.y;
+  ulong col = blockIdx.x * blockDim.x + threadIdx.x;
   //printf("Kernel Called...");
   // Iterate over row, and down column
-  if(row >= 0 && row < N && col >=0 && col < K){
+  if(row < N && col < K){
 	  c[row * K + col] = 0;
-	  for (int k = 0; k < M; k++) {
-	    // Accumulate results for a single element
-	    c[row * K + col] += a[row * M + k] * b[k * K + col];
+	  for (ulong k = 0; k < M; k++) {
+	  	c[row * K + col] += a[row * M + k] * b[k * K + col];
 	  }
   }
 }
 
-__global__ void filter_transform(const int *filters, int *resh_filt, int k, int C, int K){
+__global__ void filter_transform(const int *filters, int *resh_filt, ulong k, ulong C, ulong K){
 	//Each thread is responsible for one column of output
-	int col = blockIdx.x * blockDim.x + threadIdx.x;
-	if (col >=0 && col < K){
-		for (int i = 0; i < k*k*C; i++)
+	ulong col = blockIdx.x * blockDim.x + threadIdx.x;
+	if (col < K){
+		for (ulong i = 0; i < k*k*C; i++)
 			resh_filt[i*K + col] = filters[i + col*k*k*C];	
 	}
 }
 
-__global__ void feature_transform(const int* features, int *shards, int H, int W, int C, int k){
-	uint out_rows = H - k + 1;
-	uint out_cols = W - k + 1;
-	int col = blockIdx.x * blockDim.x + threadIdx.x;
-	int row = blockIdx.y * blockDim.y + threadIdx.y;
-	if (row >= 0 && row < out_rows && col >= 0 && col < out_cols){
-		for(int ch = 0; ch < C; ch++){
-			for (int u = 0; u < k; u++){
-				for (int v = 0; v < k; v++){
+__global__ void feature_transform(const int* features, int *shards, ulong H, ulong W, ulong C, ulong k){
+	ulong out_rows = H - k + 1;
+	ulong out_cols = W - k + 1;
+	ulong col = blockIdx.x * blockDim.x + threadIdx.x;
+	ulong row = blockIdx.y * blockDim.y + threadIdx.y;
+	if (row < out_rows && col < out_cols){
+		for(ulong ch = 0; ch < C; ch++){
+			for (ulong u = 0; u < k; u++){
+				for (ulong v = 0; v < k; v++){
 					shards[u*k+v + k*k*C*col + k*k*C*out_cols*row + ch*k*k] = features[ch*H*W + (row + u)*W + col+v];	
 				}
 			}
@@ -64,8 +63,8 @@ __global__ void feature_transform(const int* features, int *shards, int H, int W
 	}
 }
 
-void rand_mat(int *a, int size){
-	for (int i = 0; i < size; i++)
+void rand_mat(int *a, uint size){
+	for (uint i = 0; i < size; i++)
 		a[i] = rand() % 100;
 }
 
@@ -109,7 +108,7 @@ void print_4d_tensor(int *a, int rows, int cols, int channels, int number){
 	printf("\n");
 }
 
-#define TPB 10
+#define TPB 32
 
 int main(){
 	srand(10); //asserting fixed seed for reproducability
@@ -118,29 +117,29 @@ int main(){
 	//Instantiate and start nvml tracing thread
 	NVMLMonThread logger(dev, fname);
 
-	int k = 3, C = 1, K = 15000;
-	int H = 224, W = 224;
-	int feat_tr_H = (W-k+1)*(H-k+1);
-	int feat_tr_W = k*k*C;
+	ulong k = 3, C = 1, K = 131072;
+	ulong H = 224, W = 224;
+	ulong feat_tr_H = (W-k+1)*(H-k+1);
+	ulong feat_tr_W = k*k*C;
 	int *kern;
 	int *feat;
 	int *kern_tr;
 	int *feat_tr;
 	int *mat_res;
 
-	gpuErrchk(cudaMallocManaged(&kern, k*k*C*K*sizeof(int)));
-	gpuErrchk(cudaMallocManaged(&feat, H*W*C*sizeof(int)));
-	gpuErrchk(cudaMallocManaged(&kern_tr, k*k*C*K*sizeof(int)));
-	gpuErrchk(cudaMallocManaged(&feat_tr, feat_tr_H*feat_tr_W*sizeof(int)));
-	gpuErrchk(cudaMallocManaged(&mat_res, feat_tr_H*K*sizeof(int)));
+	gpuErrchk(cudaMallocManaged(&kern, sizeof(int)*k*k*C*K));
+	gpuErrchk(cudaMallocManaged(&feat, sizeof(int)*H*W*C));
+	gpuErrchk(cudaMallocManaged(&kern_tr, sizeof(int)*k*k*C*K));
+	gpuErrchk(cudaMallocManaged(&feat_tr, sizeof(int)*feat_tr_H*feat_tr_W));
+	gpuErrchk(cudaMallocManaged(&mat_res, sizeof(int)*feat_tr_H*K));
 
 	rand_mat(kern, k*k*C*K);
 	rand_mat(feat, H*W*C);
 
 	std::thread threadStart(&NVMLMonThread::log, &logger);
 
-	int THREADS = TPB;//32;
-	int BLOCKS = (K + THREADS - 1)/THREADS;
+	int THREADS = TPB;
+	ulong BLOCKS = (K + THREADS - 1)/THREADS;
 	logger.caller_state = 1; //Calling filter transform kernel state
 	filter_transform<<<BLOCKS, THREADS>>>(kern, kern_tr, k, C, K);
 	gpuErrchk(cudaDeviceSynchronize());
@@ -154,10 +153,10 @@ int main(){
 	//int THREADS_C = W-k+1;
 	//int THREADS_R = H-k+1;
 	//dim3 threads(THREADS_R, THREADS_C);
-	int FTTHREADS = TPB;//32;
+	int FTTHREADS = TPB;
 	dim3 threads(FTTHREADS, FTTHREADS);
-	int CBLOCKS = (W-k+1 + FTTHREADS - 1) / FTTHREADS;
-	int RBLOCKS = (H-k+1 + FTTHREADS - 1) / FTTHREADS;
+	ulong CBLOCKS = (W-k+1 + FTTHREADS - 1) / FTTHREADS;
+	ulong RBLOCKS = (H-k+1 + FTTHREADS - 1) / FTTHREADS;
 	dim3 blocks(CBLOCKS, RBLOCKS);
 	feature_transform<<<blocks, threads>>>(feat, feat_tr, H, W, C, k);
 	gpuErrchk(cudaDeviceSynchronize());
@@ -168,13 +167,12 @@ int main(){
 	printf("\nPrinting shards\n");
 	print_3d_tensor(feat_tr, feat_tr_H, feat_tr_W, 1);
 #endif
-	int THREADS_MUL = TPB;//32;
-	int BLOCKS_R = (feat_tr_H + THREADS_MUL - 1)/THREADS_MUL;
-	int BLOCKS_C = (K + THREADS_MUL - 1)/THREADS_MUL;
+	int THREADS_MUL = TPB;
+	ulong BLOCKS_R = (feat_tr_H + THREADS_MUL - 1)/THREADS_MUL;
+	ulong BLOCKS_C = (K + THREADS_MUL - 1)/THREADS_MUL;
 	dim3 threads_mul(THREADS_MUL, THREADS_MUL);
 	dim3 blocks_mul(BLOCKS_C, BLOCKS_R);
-	for (int i = 0; i < 40; i++)
-		matrixMul<<<blocks_mul, threads_mul>>>(feat_tr, kern_tr, mat_res, feat_tr_H, feat_tr_W, K);
+	matrixMul<<<blocks_mul, threads_mul>>>(feat_tr, kern_tr, mat_res, feat_tr_H, feat_tr_W, K);
 	gpuErrchk(cudaDeviceSynchronize());
 	logger.caller_state = 4; //Finished exec state.
 	std::thread threadKill(&NVMLMonThread::killThread, &logger);
