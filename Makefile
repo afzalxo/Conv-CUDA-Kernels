@@ -2,7 +2,7 @@ gemm_kernel:
 	nvcc gemm_kernel.cu -o gemm_kernel -lcuda -lnvidia-ml
 
 conv_gemm:
-	nvcc conv_gemm.cu -o conv_gemm -lcuda -lnvidia-ml
+	nvcc conv_gemm.cu -o conv_gemm -lcuda -lnvidia-ml -lineinfo
 
 conv_gemm_explicit:
 	nvcc conv_gemm_explicit.cu -o conv_gemm_explicit -lcuda -lnvidia-ml

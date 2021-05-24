@@ -14,6 +14,7 @@ using std::vector;
 //Printing takes quite a bit of time. Discount time logging when debugging
 #define DEBUG 0
 
+//Error check adopted from https://stackoverflow.com/questions/14038589/what-is-the-canonical-way-to-check-for-errors-using-the-cuda-runtime-api
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
 inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
 {
@@ -24,18 +25,45 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
    }
 }
 
-__global__ void matrixMul(const int *a, const int *b, int *c, ulong N, ulong M, ulong K) {
-  // Compute each thread's global row and column index
+__global__ void Matmul(const int *a, const int *b, int *c, ulong N, ulong M, ulong K) {
   ulong row = blockIdx.y * blockDim.y + threadIdx.y;
   ulong col = blockIdx.x * blockDim.x + threadIdx.x;
   //printf("Kernel Called...");
-  // Iterate over row, and down column
   if(row < N && col < K){
 	  c[row * K + col] = 0;
 	  for (ulong k = 0; k < M; k++) {
 	  	c[row * K + col] += a[row * M + k] * b[k * K + col];
 	  }
   }
+}
+
+//Adopted from https://github.com/CoffeeBeforeArch/cuda_programming/blob/master/matrixMul/tiled/mmul.cu
+#define SHMEM_SIZE 1024
+__global__ void tiledMatmul(const int *a, const int *b, int *c, uint M, uint K, uint N) {
+  int row = blockIdx.y * blockDim.y + threadIdx.y;
+  int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+  __shared__ int s_a[SHMEM_SIZE];
+  __shared__ int s_b[SHMEM_SIZE];
+
+  int tmp = 0;
+
+  if(row < M && col < N){
+	  for (int i = 0; i < K; i += blockDim.x) {
+	    s_a[threadIdx.y * blockDim.x + threadIdx.x] = a[row * K + i + threadIdx.x];
+	    s_b[threadIdx.y * blockDim.x + threadIdx.x] = b[i * N + threadIdx.y * N + col];
+
+	    __syncthreads();
+
+	    for (int j = 0; j < blockDim.x; j++) {
+		tmp += s_a[threadIdx.y * blockDim.x + j] * s_b[j * blockDim.x + threadIdx.x];
+	    }
+
+	    __syncthreads();
+	  }
+  }
+
+  c[row * N + col] = tmp;
 }
 
 __global__ void filter_transform(const int *filters, int *resh_filt, ulong k, ulong C, ulong K){
@@ -112,12 +140,12 @@ void print_4d_tensor(int *a, int rows, int cols, int channels, int number){
 
 int main(){
 	srand(10); //asserting fixed seed for reproducability
-	std::string const fname = {"trace_conv_gemm_pro.csv"};
+	std::string const fname = {"conv_gemm_shmem_32.csv"};
 	int dev = 0;
 	//Instantiate and start nvml tracing thread
 	NVMLMonThread logger(dev, fname);
 
-	ulong k = 3, C = 1, K = 131072;
+	ulong k = 3, C = 256, K = 131072;
 	ulong H = 224, W = 224;
 	ulong feat_tr_H = (W-k+1)*(H-k+1);
 	ulong feat_tr_W = k*k*C;
@@ -127,6 +155,9 @@ int main(){
 	int *feat_tr;
 	int *mat_res;
 
+	std::thread threadStart(&NVMLMonThread::log, &logger);
+	logger.caller_state = 0;
+
 	gpuErrchk(cudaMallocManaged(&kern, sizeof(int)*k*k*C*K));
 	gpuErrchk(cudaMallocManaged(&feat, sizeof(int)*H*W*C));
 	gpuErrchk(cudaMallocManaged(&kern_tr, sizeof(int)*k*k*C*K));
@@ -135,8 +166,6 @@ int main(){
 
 	rand_mat(kern, k*k*C*K);
 	rand_mat(feat, H*W*C);
-
-	std::thread threadStart(&NVMLMonThread::log, &logger);
 
 	int THREADS = TPB;
 	ulong BLOCKS = (K + THREADS - 1)/THREADS;
@@ -172,7 +201,8 @@ int main(){
 	ulong BLOCKS_C = (K + THREADS_MUL - 1)/THREADS_MUL;
 	dim3 threads_mul(THREADS_MUL, THREADS_MUL);
 	dim3 blocks_mul(BLOCKS_C, BLOCKS_R);
-	matrixMul<<<blocks_mul, threads_mul>>>(feat_tr, kern_tr, mat_res, feat_tr_H, feat_tr_W, K);
+	Matmul<<<blocks_mul, threads_mul>>>(feat_tr, kern_tr, mat_res, feat_tr_H, feat_tr_W, K);
+	//tiledMatmul<<<blocks_mul, threads_mul>>>(feat_tr, kern_tr, mat_res, feat_tr_H, feat_tr_W, K);
 	gpuErrchk(cudaDeviceSynchronize());
 	logger.caller_state = 4; //Finished exec state.
 	std::thread threadKill(&NVMLMonThread::killThread, &logger);

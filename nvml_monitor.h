@@ -54,7 +54,7 @@ class NVMLMonThread {
 				nvmlDeviceGetUtilizationRates(devhandle, &point.utilization);
 				point.state = caller_state;
 				log_enum.push_back(point);
-				std::this_thread::sleep_for(std::chrono::milliseconds(10));
+				std::this_thread::sleep_for(std::chrono::milliseconds(2));
 			}
 		}
 

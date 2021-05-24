@@ -34,7 +34,7 @@ __host__ __device__ void tile_ewm(const int *fm, const float *km, float *res, in
 		res[j] = fm[j] * km[j];
 }
 
-__global__ void ewm(const int *fm, const float *km, float *om, ulong H, ulong K, uint m = 4){
+__global__ void ewm(const int *fm, const float *km, float *om, ulong H, ulong K, uint C, uint m = 4){
 	ulong tile = blockIdx.y * blockDim.y + threadIdx.y;
 	ulong row = blockIdx.x * blockDim.x + threadIdx.x;
 	ulong kern = blockIdx.z * blockDim.z + threadIdx.z;
@@ -44,7 +44,8 @@ __global__ void ewm(const int *fm, const float *km, float *om, ulong H, ulong K,
 	ulong tilesq = tileSize*tileSize;
 	if (row < tileSize && tile < ntiles && kern < K){
 		///printf("%d,%d,%d\n",row, col, kern);
-		tile_ewm(&fm[tile*tilesq+ row*tileSize], &km[kern*tilesq + row*tileSize], &om[tilesq*ntiles*kern + tile*tilesq + row*tileSize], m);
+		for(uint ch = 0; ch < C; ch ++)
+			tile_ewm(&fm[tilesq*ntiles*ch + tile*tilesq + row*tileSize], &km[tilesq*C*kern + ch*tilesq + row*tileSize], &om[tilesq*ntiles*C*kern + tilesq*ntiles*ch + tile*tilesq + row*tileSize], m);
 	}
 }
 
@@ -107,7 +108,8 @@ __global__ void filter_transform(const int *filters, float *resh_filt, int k, in
 	//Each thread is responsible for one filter
 	ulong col = blockIdx.x * blockDim.x + threadIdx.x;
 	if (col < K){
-		transform_filter_tile(&filters[9*col], &resh_filt[36*col], 4);
+		for(int ch = 0; ch < C; ch++)
+			transform_filter_tile(&filters[9*ch + 9*C*col], &resh_filt[36*ch + 36*C*col], 4);
 	}
 }
 
@@ -145,14 +147,13 @@ __global__ void feature_transform(const int* features, int *shards, int H, int W
 		for(int ch = 0; ch < C; ch++){
 			for (int u = 0; u < tsize; u++){
 				for (int v = 0; v < tsize; v++){
-					//shards[u*k+v + k*k*C*col + k*k*C*out_cols*row + ch*k*k] = features[ch*H*W + (row*m+u)*W + col*m+v];	
-					temp[u*tsize + v] = features[(row*W + col)*m + u*W + v];
+					temp[u*tsize + v] = features[H*W*ch + (row*W + col)*m + u*W + v];
 				}
 			}
 			transform_feature_tile(temp, ft_tile, m);
 		 	for (int u =0; u < tsize; u++){
 				for (int v = 0; v < tsize; v++){
-					shards[(row*out_cols + col) * tsize*tsize + u*tsize + v] = ft_tile[u*tsize + v];
+					shards[ch*tsize*tsize*out_rows*out_cols + (row*out_cols + col) * tsize*tsize + u*tsize + v] = ft_tile[u*tsize + v];
 				}
 			}	
 		}
@@ -217,9 +218,10 @@ void print_4d_tensor(int *a, int rows, int cols, int channels, int number){
 }
 
 #define TPB 10
+
 int main(){
 	srand(10); //asserting fixed seed for reproducability
-	std::string const fname = {"trace_conv_wino.csv"};
+	std::string const fname = {"trace_conv_wino_10.csv"};
 	int dev = 0;
 	//Instantiate and start nvml tracing thread
 	NVMLMonThread logger(dev, fname);
@@ -247,7 +249,7 @@ int main(){
 
 	std::thread threadStart(&NVMLMonThread::log, &logger);
 	
-	int THREADS = TPB;//32*32;
+	int THREADS = TPB;
 	int BLOCKS = (K + THREADS - 1)/THREADS;
 	logger.caller_state = 1; //Calling filter transform kernel state
 	filter_transform<<<BLOCKS, THREADS>>>(kern, kern_tr, k, C, K);
@@ -300,7 +302,7 @@ int main(){
 	int BLOCKS_Z = (K + THREADS_MUL - 1)/THREADS_MUL;
 	dim3 threads_mul(THREADS_MUL, THREADS_MUL, THREADS_MUL);
 	dim3 blocks_mul(BLOCKS_X, BLOCKS_Y, BLOCKS_Z);
-	ewm<<<blocks_mul, threads_mul>>>(feat_tr, kern_tr, ewm_res, H, K, m);
+	ewm<<<blocks_mul, threads_mul>>>(feat_tr, kern_tr, ewm_res, H, K, C, m);
 	gpuErrchk(cudaDeviceSynchronize());
 	cudaFree(feat_tr);
 	cudaFree(kern_tr);
@@ -327,8 +329,8 @@ int main(){
 	threadStart.join();
 	threadKill.join();
 
-	printf("\nPrinting partial EWM output for sanity check\n");
-	print_3d_tensor_float(ewm_res, m*m*2, 1, 1);
+	//printf("\nPrinting partial EWM output for sanity check\n");
+	//print_3d_tensor_float(ewm_res, m*m*2, 1, 1);
 
 	cudaFree(ewm_res);
 	//cudaFree(conv_out);
@@ -337,31 +339,3 @@ int main(){
 	return 0;
 }
 
-/*
-uint out_rows = uint((H + 2*padding - k) / stride) + 1;
-uint out_cols = uint((W + 2*padding - k) / stride) + 1;
-uint temp0 = 0, temp1 = 0;
-float *reshaped_filters = new float[k*k*C*K];
-float *shards = new float[out_rows*out_cols*k*k*C];
-//Reshaping filters from [k,k,C,K] to [k*k*C, K]
-for(uint c = 0; c < K; c++){
-	for(uint r = 0; r < k*k*C; r++){
-		reshaped_filters[r*K+c] = kernel[r+c*k*k*C];
-	}
-}
-
-//Reshaping activations and collecting shards: Shards shape [out_rows*out_cols, k*k*C] when using SGEMM, otherwise [out_rows, out_cols, k*k*C]
-for(uint r = 0; r < out_rows; r++){
-	for(uint c = 0; c < out_cols; c++){
-		for(uint ch = 0; ch < C; ch++){
-			for(uint u = 0; u < k; u++){
-				for(uint v = 0; v < k; v++){
-					temp0 = r + u;
-					temp1 = c + v;
-					shards[u*k+v + k*k*C*c + k*k*C*out_cols*r + ch*k*k] = data[ch*H*W+(temp0)*W+(temp1)];
-				}
-			}
-		}	
-	}
-}
-*/
