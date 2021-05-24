@@ -28,23 +28,24 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 }
 
 
-__host__ __device__ void tile_ewm(const int *fm, const float *km, float *res, int m = 4){
+__host__ __device__ void tile_ewm(const int *fm, const float *km, float *res, int m = 4){ 
 	int tileSize = m+3-1;
-	for (int i = 0; i < tileSize; i++)
-		for(int j = 0; j < tileSize; j++)
-			res[i*tileSize+j] = fm[i*tileSize+j] * km[i*tileSize+j];
+	for(int j = 0; j < tileSize; j++)
+		res[j] = fm[j] * km[j];
 }
 
 __global__ void ewm(const int *fm, const float *km, float *om, int H, int K, int m = 4){
-	int row = blockIdx.y * blockDim.y + threadIdx.y;
-	int col = blockIdx.x * blockDim.x + threadIdx.x;
+	int tile = blockIdx.y * blockDim.y + threadIdx.y;
+	int row = blockIdx.x * blockDim.x + threadIdx.x;
 	int kern = blockIdx.z * blockDim.z + threadIdx.z;
 	int tiles = (H - 3 + 1)/m;
+	int ntiles = tiles*tiles;
 	int tileSize = m + 3 -1;
+	int tilesq = tileSize*tileSize;
 	//printf("%d, %d, %d", row, col, kern);
-	if (row >= 0 && row < tiles && col >=0 && col < tiles && kern >=0 && kern < K){
+	if (row >= 0 && row < tileSize && tile >=0 && tile < ntiles && kern >=0 && kern < K){
 		///printf("%d,%d,%d\n",row, col, kern);
-		tile_ewm(&fm[(row*tiles + col)*tileSize*tileSize], &km[tileSize*tileSize*kern], &om[tileSize*tileSize*tiles*tiles*kern + (row*tiles+col)*tileSize*tileSize], m);
+		tile_ewm(&fm[tile*tilesq+ row*tileSize], &km[kern*tilesq + row*tileSize], &om[tilesq*ntiles*kern + tile*tilesq + row*tileSize], m);
 	}
 }
 
@@ -296,11 +297,11 @@ int main(){
 	gpuErrchk(cudaMallocManaged(&ewm_res, sizeof(float)*feat_tiles_per_ch*tileSize*tileSize*C*K));
 	gpuErrchk(cudaDeviceSynchronize());
 	int THREADS_MUL = TPB;//8;
-	int BLOCKS_R = (feat_tiles_per_ch_vert + THREADS_MUL - 1)/THREADS_MUL;
-	int BLOCKS_C = (feat_tiles_per_ch_horiz + THREADS_MUL - 1)/THREADS_MUL;
+	int BLOCKS_X = (tileSize + THREADS_MUL - 1)/THREADS_MUL;
+	int BLOCKS_Y = (feat_tiles_per_ch + THREADS_MUL - 1)/THREADS_MUL;
 	int BLOCKS_Z = (K + THREADS_MUL - 1)/THREADS_MUL;
 	dim3 threads_mul(THREADS_MUL, THREADS_MUL, THREADS_MUL);
-	dim3 blocks_mul(BLOCKS_C, BLOCKS_R, BLOCKS_Z);
+	dim3 blocks_mul(BLOCKS_X, BLOCKS_Y, BLOCKS_Z);
 	for (int i =0; i < 40; i++)
 		ewm<<<blocks_mul, threads_mul>>>(feat_tr, kern_tr, ewm_res, H, K, m);
 	gpuErrchk(cudaDeviceSynchronize());
