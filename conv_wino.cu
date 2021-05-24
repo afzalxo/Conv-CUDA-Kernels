@@ -42,8 +42,9 @@ __global__ void ewm(const int *fm, const float *km, float *om, int H, int K, int
 	int tiles = (H - 3 + 1)/m;
 	int tileSize = m + 3 -1;
 	//printf("%d, %d, %d", row, col, kern);
-	if (row < tiles && col < tiles && kern < K){
-		tile_ewm(&fm[(row*tiles + col)*tileSize*tileSize], &km[tileSize*tileSize*kern], &om[tileSize*tileSize*tiles*tiles*kern + (row*tiles+col) * tileSize*tileSize], m);
+	if (row >= 0 && row < tiles && col >=0 && col < tiles && kern >=0 && kern < K){
+		///printf("%d,%d,%d\n",row, col, kern);
+		tile_ewm(&fm[(row*tiles + col)*tileSize*tileSize], &km[tileSize*tileSize*kern], &om[tileSize*tileSize*tiles*tiles*kern + (row*tiles+col)*tileSize*tileSize], m);
 	}
 }
 
@@ -76,7 +77,7 @@ __global__ void inverse_transform(const float *M, float *res, int H, int K, int 
 	int tiles = (H - 3 + 1)/m;
 	int tileSize = m + 3 -1;
 	//printf("%d, %d, %d\n", row, col, kern);
-	if (row < tiles && col < tiles && kern < K){
+	if (row >= 0 && row < tiles && col >= 0 && col < tiles && kern >=0 && kern < K){
 		tile_inv_transform(&M[(row*tiles+col)*tileSize*tileSize + tileSize*tileSize*tiles*tiles*kern], &res[(row*tiles+col)*m*m + m*m*tiles*tiles*kern], m);
 	}		
 }
@@ -216,6 +217,7 @@ void print_4d_tensor(int *a, int rows, int cols, int channels, int number){
 	printf("\n");
 }
 
+#define TPB 10
 int main(){
 	srand(10); //asserting fixed seed for reproducability
 	std::string const fname = {"trace_conv_wino.csv"};
@@ -223,8 +225,8 @@ int main(){
 	//Instantiate and start nvml tracing thread
 	NVMLMonThread logger(dev, fname);
 
-	int k = 3, C = 1, K = pow(2,9);
-	int H = 998, W = 998, m = 4;
+	int k = 3, C = 1, K = 15000;
+	int H = 224, W = 224, m = 4;
 	int tileSize = m + k - 1;
 	int feat_tiles_per_ch_horiz = (W - k + 1) / m;
 	int feat_tiles_per_ch_vert = (H - k + 1) / m;
@@ -236,23 +238,21 @@ int main(){
 	float *ewm_res;
 	float *conv_out;
 
-	gpuErrchk(cudaMallocManaged(&kern, k*k*C*K*sizeof(int)));
 	gpuErrchk(cudaMallocManaged(&feat, H*W*C*sizeof(int)));
-	gpuErrchk(cudaMallocManaged(&kern_tr, tileSize*tileSize*C*K*sizeof(float)));
 	gpuErrchk(cudaMallocManaged(&feat_tr, tileSize*tileSize*feat_tiles_per_ch*C*sizeof(int)));
-	gpuErrchk(cudaMallocManaged(&ewm_res, feat_tiles_per_ch*tileSize*tileSize*C*K*sizeof(float)));
-	gpuErrchk(cudaMallocManaged(&conv_out, feat_tiles_per_ch*m*m*C*K*sizeof(float)));
+	gpuErrchk(cudaMallocManaged(&kern, k*k*C*K*sizeof(int)));
+	gpuErrchk(cudaMallocManaged(&kern_tr, tileSize*tileSize*C*K*sizeof(float)));
 
 	rand_mat(kern, k*k*C*K);
 	rand_mat(feat, H*W*C);
 
 	std::thread threadStart(&NVMLMonThread::log, &logger);
 	
-	int THREADS = 32*32;
+	int THREADS = TPB;//32*32;
 	int BLOCKS = (K + THREADS - 1)/THREADS;
 	logger.caller_state = 1; //Calling filter transform kernel state
 	filter_transform<<<BLOCKS, THREADS>>>(kern, kern_tr, k, C, K);
-	//gpuErrchk(cudaDeviceSynchronize()); //Dont need to block exec here since feature_transform is indep of filter transform.
+	gpuErrchk(cudaDeviceSynchronize()); //Dont need to block exec here since feature_transform is indep of filter transform.
 	logger.caller_state = 2; //Calling FM transform kernel exec state
 #if DEBUG
 	printf("Printing original filters\n");
@@ -277,7 +277,7 @@ int main(){
 	//print_3d_tensor(feat, H, W, C);
 	//print_3d_tensor(ft_out, 6,6,1);
 		
-	int FTTHREADS = 32;
+	int FTTHREADS = TPB;//32;
 	dim3 threads(FTTHREADS, FTTHREADS);
 	int CBLOCKS = ((W-k+1)/m + FTTHREADS - 1) / FTTHREADS;
 	int RBLOCKS = ((H-k+1)/m + FTTHREADS - 1) / FTTHREADS;
@@ -291,23 +291,30 @@ int main(){
 	printf("\nPrinting shards\n");
 	print_3d_tensor_int(feat_tr, tileSize, tileSize, feat_tiles_per_ch);
 #endif
-	
-	
-	int THREADS_MUL = 10;
+	cudaFree(feat);
+	cudaFree(kern);
+	gpuErrchk(cudaMallocManaged(&ewm_res, sizeof(float)*feat_tiles_per_ch*tileSize*tileSize*C*K));
+	gpuErrchk(cudaDeviceSynchronize());
+	int THREADS_MUL = TPB;//8;
 	int BLOCKS_R = (feat_tiles_per_ch_vert + THREADS_MUL - 1)/THREADS_MUL;
 	int BLOCKS_C = (feat_tiles_per_ch_horiz + THREADS_MUL - 1)/THREADS_MUL;
 	int BLOCKS_Z = (K + THREADS_MUL - 1)/THREADS_MUL;
 	dim3 threads_mul(THREADS_MUL, THREADS_MUL, THREADS_MUL);
 	dim3 blocks_mul(BLOCKS_C, BLOCKS_R, BLOCKS_Z);
-	ewm<<<blocks_mul, threads_mul>>>(feat_tr, kern_tr, ewm_res, H, K, m);
+	for (int i =0; i < 40; i++)
+		ewm<<<blocks_mul, threads_mul>>>(feat_tr, kern_tr, ewm_res, H, K, m);
 	gpuErrchk(cudaDeviceSynchronize());
+	cudaFree(feat_tr);
+	cudaFree(kern_tr);
 	logger.caller_state = 4; //Inv transform exec state.
 
 #if DEBUG
 	printf("\nPrinting EWM result\n");
 	print_3d_tensor_float(ewm_res, tileSize*tileSize, feat_tiles_per_ch_horiz, feat_tiles_per_ch_vert*K);
 #endif
-	int THREADS_INV = 10;
+
+	gpuErrchk(cudaMallocManaged(&conv_out, sizeof(float)*feat_tiles_per_ch*m*m*C*K));
+	int THREADS_INV = TPB;//8;
 	int BLOCKS_V = (feat_tiles_per_ch_vert + THREADS_INV - 1)/THREADS_INV;
 	int BLOCKS_U = (feat_tiles_per_ch_horiz + THREADS_INV - 1)/THREADS_INV;
 	int BLOCKS_W = (K + THREADS_INV - 1)/THREADS_INV;
@@ -316,18 +323,16 @@ int main(){
 	inverse_transform<<<blocks_inv, threads_inv>>>(ewm_res, conv_out, H, K, m);
 	gpuErrchk(cudaDeviceSynchronize());
 	logger.caller_state = 5; //Finished exec state
-#if DEBUG
-	printf("\nPrinting Conv Output\n");
-	print_3d_tensor_float(conv_out, m*m, feat_tiles_per_ch_horiz, feat_tiles_per_ch_vert*K);
-#endif
+
 	std::thread threadKill(&NVMLMonThread::killThread, &logger);
 	threadStart.join();
 	threadKill.join();
 
-	cudaFree(kern);
-	cudaFree(feat);
-	cudaFree(feat_tr);
-	cudaFree(kern_tr);
+//#if DEBUG
+	printf("\nPrinting Conv Output\n");
+	print_3d_tensor_float(conv_out, m*m*2, 1, 1);
+//#endif
+
 	cudaFree(ewm_res);
 	cudaFree(conv_out);
 	

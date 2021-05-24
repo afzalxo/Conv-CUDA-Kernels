@@ -109,15 +109,17 @@ void print_4d_tensor(int *a, int rows, int cols, int channels, int number){
 	printf("\n");
 }
 
+#define TPB 10
+
 int main(){
 	srand(10); //asserting fixed seed for reproducability
-	std::string const fname = {"trace_conv_gemm.csv"};
+	std::string const fname = {"trace_conv_gemm_pro.csv"};
 	int dev = 0;
 	//Instantiate and start nvml tracing thread
 	NVMLMonThread logger(dev, fname);
 
-	int k = 3, C = 8192, K = 16384;
-	int H = 56, W = 56;
+	int k = 3, C = 1, K = 15000;
+	int H = 224, W = 224;
 	int feat_tr_H = (W-k+1)*(H-k+1);
 	int feat_tr_W = k*k*C;
 	int *kern;
@@ -137,7 +139,7 @@ int main(){
 
 	std::thread threadStart(&NVMLMonThread::log, &logger);
 
-	int THREADS = 32;
+	int THREADS = TPB;//32;
 	int BLOCKS = (K + THREADS - 1)/THREADS;
 	logger.caller_state = 1; //Calling filter transform kernel state
 	filter_transform<<<BLOCKS, THREADS>>>(kern, kern_tr, k, C, K);
@@ -152,7 +154,7 @@ int main(){
 	//int THREADS_C = W-k+1;
 	//int THREADS_R = H-k+1;
 	//dim3 threads(THREADS_R, THREADS_C);
-	int FTTHREADS = 32;
+	int FTTHREADS = TPB;//32;
 	dim3 threads(FTTHREADS, FTTHREADS);
 	int CBLOCKS = (W-k+1 + FTTHREADS - 1) / FTTHREADS;
 	int RBLOCKS = (H-k+1 + FTTHREADS - 1) / FTTHREADS;
@@ -166,12 +168,13 @@ int main(){
 	printf("\nPrinting shards\n");
 	print_3d_tensor(feat_tr, feat_tr_H, feat_tr_W, 1);
 #endif
-	int THREADS_MUL = 32;
+	int THREADS_MUL = TPB;//32;
 	int BLOCKS_R = (feat_tr_H + THREADS_MUL - 1)/THREADS_MUL;
 	int BLOCKS_C = (K + THREADS_MUL - 1)/THREADS_MUL;
 	dim3 threads_mul(THREADS_MUL, THREADS_MUL);
 	dim3 blocks_mul(BLOCKS_C, BLOCKS_R);
-	matrixMul<<<blocks_mul, threads_mul>>>(feat_tr, kern_tr, mat_res, feat_tr_H, feat_tr_W, K);
+	for (int i = 0; i < 40; i++)
+		matrixMul<<<blocks_mul, threads_mul>>>(feat_tr, kern_tr, mat_res, feat_tr_H, feat_tr_W, K);
 	gpuErrchk(cudaDeviceSynchronize());
 	logger.caller_state = 4; //Finished exec state.
 	std::thread threadKill(&NVMLMonThread::killThread, &logger);
