@@ -217,11 +217,11 @@ void print_4d_tensor(int *a, int rows, int cols, int channels, int number){
 	printf("\n");
 }
 
-#define TPB 10
+#define TPB 4
 
 int main(){
 	srand(10); //asserting fixed seed for reproducability
-	std::string const fname = {"trace_conv_wino_10.csv"};
+	std::string const fname = {"trace_conv_wino_4.csv"};
 	int dev = 0;
 	//Instantiate and start nvml tracing thread
 	NVMLMonThread logger(dev, fname);

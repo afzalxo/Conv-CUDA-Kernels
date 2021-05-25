@@ -14,6 +14,7 @@
 
 #include <cuda_runtime.h>
 
+//Adopted from https://github.com/mnicely/nvml_examples/blob/master/nvmlClass.h
 class NVMLMonThread {
 	public:
 		nvmlDevice_t devhandle;
